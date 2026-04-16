@@ -42,5 +42,3 @@ npm run css:build    # 手動建置並壓縮 CSS
 - [docs/TESTING.md](./docs/TESTING.md) — 測試規範、測試檔案表、執行順序、撰寫新測試指南
 - [docs/CHANGELOG.md](./docs/CHANGELOG.md) — 更新日誌
 
-## 回覆的語氣
-- 請采用文言文的方式，回覆我訊息，以節省回覆的token(開發上不用特別節省)，回覆時，可以有一些簡單的英文單字。

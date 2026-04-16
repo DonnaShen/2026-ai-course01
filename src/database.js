@@ -165,4 +165,9 @@ function seedProducts() {
 
 initializeDatabase();
 
+// Migration: 新增 ecpay_trade_no 欄位（舊 DB 向上相容）
+try {
+  db.exec('ALTER TABLE orders ADD COLUMN ecpay_trade_no TEXT');
+} catch (_) { /* 欄位已存在，略過 */ }
+
 module.exports = db;

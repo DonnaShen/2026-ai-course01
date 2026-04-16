@@ -133,13 +133,15 @@ router.post('/', (req, res) => {
 
   const orderId = uuidv4();
   const orderNo = generateOrderNo();
+  // MerchantTradeNo：去除 "-"，最長 20 字元，純英數（ORD20260416ABC12 = 16 字元）
+  const ecpayTradeNo = orderNo.replace(/-/g, '');
 
   // Transaction: create order, order items, deduct stock, clear cart
   const createOrder = db.transaction(() => {
     db.prepare(
-      `INSERT INTO orders (id, order_no, user_id, recipient_name, recipient_email, recipient_address, total_amount)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(orderId, orderNo, userId, recipientName, recipientEmail, recipientAddress, totalAmount);
+      `INSERT INTO orders (id, order_no, ecpay_trade_no, user_id, recipient_name, recipient_email, recipient_address, total_amount)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(orderId, orderNo, ecpayTradeNo, userId, recipientName, recipientEmail, recipientAddress, totalAmount);
 
     const insertItem = db.prepare(
       `INSERT INTO order_items (id, order_id, product_id, product_name, product_price, quantity)

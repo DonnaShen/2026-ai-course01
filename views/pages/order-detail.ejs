@@ -70,22 +70,21 @@
       </table>
     </div>
 
-    <!-- Payment Buttons -->
-    <div v-if="order.status === 'pending'" class="flex gap-4">
+    <!-- Payment Button -->
+    <div v-if="order.status === 'pending'" class="flex items-center gap-4">
       <button
-        @click="handlePaySuccess"
+        @click="goToPayment"
         :disabled="paying"
         class="bg-sage text-white px-8 py-3 rounded-full text-sm font-medium hover:bg-sage/90 transition-colors disabled:opacity-50"
       >
-        {{ paying ? '處理中...' : '付款成功' }}
+        {{ paying ? '跳轉中...' : '前往付款' }}
       </button>
-      <button
-        @click="handlePayFail"
-        :disabled="paying"
-        class="bg-red-500 text-white px-8 py-3 rounded-full text-sm font-medium hover:bg-red-600 transition-colors disabled:opacity-50"
-      >
-        {{ paying ? '處理中...' : '付款失敗' }}
-      </button>
+    </div>
+
+    <!-- Querying Spinner -->
+    <div v-if="querying" class="flex items-center gap-3 mt-4 text-sm text-text-secondary">
+      <div class="w-4 h-4 border-2 border-sage border-t-transparent rounded-full animate-spin"></div>
+      正在向綠界確認付款結果...
     </div>
   </template>
 </div>
