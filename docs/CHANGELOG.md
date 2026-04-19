@@ -8,6 +8,32 @@
 
 ---
 
+## [1.1.0] — 2026-04-16
+
+### Added
+
+**ECPay AIO 金流整合**
+- 新增 `src/ecpay.js`：ECPay 工具函式庫
+  - `ecpayUrlEncode`：Node.js 版 ECPay URL encode
+  - `generateCheckMacValue`：SHA256 CheckMacValue 計算（過濾→排序→HashKey/IV 拼接→encode→SHA256→toUpperCase）
+  - `verifyCheckMacValue`：timing-safe CMV 驗證
+  - `buildAioFormHtml`：產生含 hidden inputs 的 auto-submit HTML form
+  - `queryTradeInfo`：呼叫 ECPay `/Cashier/QueryTradeInfo/V5`，TimeStamp 每次重新產生
+- 新增 `src/routes/ecpayRoutes.js`：4 個金流端點
+  - `POST /api/ecpay/checkout/:orderId`：驗證訂單→組 AIO 參數→回傳 auto-submit HTML 導向綠界
+  - `POST /api/ecpay/notify`：ReturnURL，驗證 CMV 後更新訂單狀態，回傳 `1|OK`
+  - `POST /api/ecpay/result`：OrderResultURL，驗證 CMV→依 RtnCode 更新狀態→redirect 訂單頁
+  - `GET /api/ecpay/query/:orderId`：主動呼叫 QueryTradeInfo 確認最終付款狀態
+- `orders` 表新增 `ecpay_trade_no` 欄位（Migration 向上相容舊資料庫）
+- 建立訂單時自動產生 `ecpay_trade_no`（= `order_no` 去除 `-`，≤ 20 字元）
+
+### Changed
+
+- 訂單詳情頁（`/orders/:id`）：移除模擬付款按鈕，新增「前往付款」按鈕（`status='pending'` 時顯示）
+- `public/js/pages/order-detail.js`：移除 `simulatePay`，新增 `goToPayment()`（fetch checkout 端點取回 HTML form 並提交）與 `queryPaymentStatus()`（頁面載入時若偵測到 `?payment=` query param 自動呼叫）
+
+---
+
 ## [1.0.0] — 2026-04-15
 
 ### Added

@@ -34,11 +34,13 @@ project-root/
 │   │   ├── adminMiddleware.js  # 檢查 req.user.role === 'admin'
 │   │   ├── sessionMiddleware.js # 提取 X-Session-Id header，設定 req.sessionId
 │   │   └── errorHandler.js    # Express 全域錯誤處理（4 個參數）
+│   ├── ecpay.js                # ECPay 工具函式（CMV、AIO Form、QueryTradeInfo）
 │   └── routes/
 │       ├── authRoutes.js       # POST /api/auth/register|login, GET /api/auth/profile
 │       ├── productRoutes.js    # GET /api/products, GET /api/products/:id
 │       ├── cartRoutes.js       # GET/POST /api/cart, PATCH/DELETE /api/cart/:itemId
 │       ├── orderRoutes.js      # POST/GET /api/orders, GET/PATCH /api/orders/:id(/pay)
+│       ├── ecpayRoutes.js      # POST /api/ecpay/checkout/:id, /notify, /result; GET /api/ecpay/query/:id
 │       ├── adminProductRoutes.js # GET/POST /api/admin/products, PUT/DELETE /api/admin/products/:id
 │       ├── adminOrderRoutes.js # GET /api/admin/orders, GET /api/admin/orders/:id
 │       └── pageRoutes.js       # 所有前台與後台 EJS 頁面路由
@@ -162,7 +164,16 @@ npm start
 | POST | /api/orders | JWT 必要 | 從購物車建立訂單 |
 | GET | /api/orders | JWT 必要 | 取得我的訂單列表 |
 | GET | /api/orders/:id | JWT 必要 | 取得訂單詳情 |
-| PATCH | /api/orders/:id/pay | JWT 必要 | 模擬付款（成功/失敗） |
+| PATCH | /api/orders/:id/pay | JWT 必要 | 模擬付款（成功/失敗，測試用） |
+
+### ECPay 金流 API — `/api/ecpay`
+
+| 方法 | 路徑 | 認證 | 說明 |
+|------|------|------|------|
+| POST | /api/ecpay/checkout/:orderId | JWT 必要 | 產生 AIO auto-submit form，導向綠界付款頁 |
+| POST | /api/ecpay/notify | 無（Server-to-Server） | ReturnURL 回呼，驗證 CMV 後更新訂單狀態，回傳 `1\|OK` |
+| POST | /api/ecpay/result | 無（瀏覽器 POST） | OrderResultURL，驗證 CMV 後 redirect 至訂單詳情頁 |
+| GET | /api/ecpay/query/:orderId | JWT 必要 | 主動呼叫 QueryTradeInfo 確認付款狀態並更新 DB |
 
 ### 管理員商品 API — `/api/admin/products`
 
@@ -338,6 +349,7 @@ if (req.user) {
 |------|------|------|------|
 | id | TEXT | PRIMARY KEY | UUID v4 |
 | order_no | TEXT | UNIQUE NOT NULL | 訂單編號，格式 `ORD-YYYYMMDD-XXXXX` |
+| ecpay_trade_no | TEXT | — | ECPay 商店訂單編號（`order_no` 去除 `-`，如 `ORD20260416ABC12`，≤ 20 字元） |
 | user_id | TEXT | FK → users(id)，NOT NULL | 購買用戶 |
 | recipient_name | TEXT | NOT NULL | 收件人姓名 |
 | recipient_email | TEXT | NOT NULL | 收件人 Email |
@@ -388,20 +400,53 @@ if (req.user) {
   │       4. DELETE cart_items
   │   }
   │
-  └─ PATCH /api/orders/:id/pay → 更新狀態 pending → paid/failed
+  └─ PATCH /api/orders/:id/pay → 更新狀態 pending → paid/failed（測試用模擬端點）
+```
+
+### ECPay AIO 付款流程
+
+```
+已登入用戶於訂單詳情頁點「前往付款」
+  │
+  ├─ POST /api/ecpay/checkout/:orderId (Bearer token)
+  │   └─ 驗證訂單屬於該 user 且 status='pending'
+  │   └─ 組合 AIO 參數（MerchantTradeNo = ecpay_trade_no, ItemName, TotalAmount...）
+  │   └─ generateCheckMacValue → buildAioFormHtml → 回傳 auto-submit HTML
+  │
+  ├─ 瀏覽器自動 POST 至 ECPay staging AIO 端點
+  │   └─ 使用者完成信用卡付款
+  │
+  ├─ ECPay POST /api/ecpay/result (OrderResultURL，瀏覽器)
+  │   └─ verifyCheckMacValue → 依 RtnCode 更新 orders.status
+  │   └─ redirect 至 /orders/:id?payment=success|failed
+  │
+  ├─ (同步) ECPay POST /api/ecpay/notify (ReturnURL，Server-to-Server)
+  │   └─ 本地環境不會收到，但回傳 "1|OK" 符合 ECPay 規範
+  │
+  └─ 前端偵測 ?payment= query param → GET /api/ecpay/query/:orderId
+      └─ 呼叫 QueryTradeInfo（有效期 3 分鐘 TimeStamp）
+      └─ TradeStatus='1' → status='paid'，否則依 TradeStatus 決定 pending/failed
+      └─ 頁面顯示最終付款結果
 ```
 
 ---
 
-## 金流整合（未實現）
+## ECPay 工具函式（`src/ecpay.js`）
 
-`.env` 中預留了 ECPay 相關環境變數：
+| 函式 | 說明 |
+|------|------|
+| `ecpayUrlEncode(str)` | Node.js 版 ECPay URL encode（`%20→+`、`~→%7e`、`'→%27`，還原 7 個不編碼字元） |
+| `generateCheckMacValue(params, hashKey, hashIv)` | 過濾 CheckMacValue → key 不分大小寫排序 → 拼 HashKey/IV → ecpayUrlEncode → SHA256 → toUpperCase |
+| `verifyCheckMacValue(params, hashKey, hashIv)` | timing-safe 驗證（先比長度，再比字串） |
+| `buildAioFormHtml(params, actionUrl)` | 回傳含 hidden inputs 的 auto-submit HTML |
+| `queryTradeInfo(merchantTradeNo, config)` | POST `/Cashier/QueryTradeInfo/V5`，TimeStamp 每次重新產生，回傳 URL-encoded 解析物件 |
 
-```
-ECPAY_MERCHANT_ID=3002607
-ECPAY_HASH_KEY=pwFHCqoQZGmho4w6
-ECPAY_HASH_IV=EkRm7iFT261dpevs
-ECPAY_ENV=staging
-```
+**相關環境變數**：
 
-**現況**：使用模擬付款端點 `PATCH /api/orders/:id/pay`，由前端傳入 `action: 'success'|'fail'` 來切換訂單狀態，不經過真實金流閘道。未來若需接入 ECPay，需在此端點替換為真實的金流 SDK 呼叫。
+| 變數 | 說明 |
+|------|------|
+| `ECPAY_MERCHANT_ID` | 綠界商店代號（staging: `3002607`） |
+| `ECPAY_HASH_KEY` | 綠界 HashKey |
+| `ECPAY_HASH_IV` | 綠界 HashIV |
+| `ECPAY_ENV` | `staging`（測試）或 `production`（正式），決定 API base URL |
+| `BASE_URL` | 伺服器對外 URL，用於組合 ReturnURL / OrderResultURL |

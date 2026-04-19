@@ -9,13 +9,13 @@
 | 購物車（訪客 + 已登入） | ✅ 完成 | 雙模式，Session ID 或 JWT |
 | 訂單建立（含庫存扣減） | ✅ 完成 | Transaction 確保原子性 |
 | 訂單查詢 | ✅ 完成 | 列表 + 詳情 |
-| 模擬付款 | ✅ 完成 | 手動觸發成功/失敗 |
+| 模擬付款（測試用） | ✅ 完成 | 手動觸發成功/失敗，不經真實金流 |
+| ECPay AIO 金流整合 | ✅ 完成 | 綠界 AIO 信用卡付款，QueryTradeInfo 確認結果 |
 | 管理員商品管理 | ✅ 完成 | CRUD 含庫存保護 |
 | 管理員訂單查詢 | ✅ 完成 | 分頁 + 狀態篩選 + 用戶資訊 |
 | 前台頁面（EJS + Vue 3） | ✅ 完成 | 9 個頁面 |
 | 後台頁面（EJS + Vue 3） | ✅ 完成 | 2 個管理頁面 |
 | OpenAPI 文件 | ✅ 完成 | 生成 openapi.json |
-| ECPay 金流整合 | ❌ 未實現 | 環境變數預留，未實作 |
 
 ---
 
@@ -406,7 +406,99 @@ paid/failed → 不允許任何狀態轉移（返回 422）
 
 ---
 
-## 5. 管理員商品管理
+## 5. ECPay AIO 金流
+
+> **整合模式**：本地端無法接收 Server-to-Server Notify，付款結果以主動呼叫 `QueryTradeInfo` API 為授信依據。
+
+### POST /api/ecpay/checkout/:orderId — 發起付款
+
+**認證**：JWT 必要
+
+**行為描述**：驗證訂單後，組合綠界 AIO 參數並產生 auto-submit HTML form，瀏覽器收到後自動 POST 至 ECPay 付款頁面。
+
+**前置條件**：
+- 訂單必須屬於當前登入用戶
+- 訂單 `status` 必須為 `pending`
+- 訂單必須有 `ecpay_trade_no`（建立訂單時自動產生）
+
+**AIO 必填參數**：
+- `MerchantTradeNo`：= `orders.ecpay_trade_no`（`order_no` 去除 `-`，≤ 20 字元）
+- `MerchantTradeDate`：台灣時區 `yyyy/MM/dd HH:mm:ss`
+- `TotalAmount`：= `orders.total_amount`
+- `ItemName`：商品名稱以 `#` 串接，總長截斷至 400 字元
+- `ChoosePayment: Credit`、`EncryptType: 1`（SHA256 CMV）
+
+**錯誤情境**：
+- 訂單不存在或不屬於當前用戶 → 404 `NOT_FOUND`
+- 訂單 status 非 `pending` → 400 `INVALID_STATUS`
+- 訂單缺少 ecpay_trade_no → 400 `NO_TRADE_NO`
+
+---
+
+### POST /api/ecpay/notify — ReturnURL 回呼
+
+**認證**：無（Server-to-Server，由 ECPay 主動呼叫）
+
+**行為描述**：ECPay 付款完成後，以 Server-to-Server POST 通知本伺服器。本地開發環境不會收到此呼叫，但端點必須存在以符合 ECPay 規範。
+
+**業務邏輯**：
+1. 以 `verifyCheckMacValue` 驗證簽章
+2. `RtnCode === '1'`（付款成功）→ `UPDATE orders SET status = 'paid'`
+3. 回傳純文字 `1|OK`（ECPay 規範要求）
+
+---
+
+### POST /api/ecpay/result — OrderResultURL 瀏覽器回呼
+
+**認證**：無（瀏覽器 POST，由 ECPay 頁面導回）
+
+**行為描述**：用戶在 ECPay 付款頁面完成或取消後，ECPay 將瀏覽器 POST 至此端點，伺服器驗證後 redirect 至訂單詳情頁。
+
+**業務邏輯**：
+1. 以 `MerchantTradeNo` 查詢對應訂單
+2. 以 `verifyCheckMacValue` 驗證簽章 → 失敗 redirect 至 `/orders/:id?payment=failed`
+3. `RtnCode === '1'` → `status = 'paid'`，redirect `/orders/:id?payment=success`
+4. 其他 RtnCode → `status = 'failed'`，redirect `/orders/:id?payment=failed`
+
+**注意**：此端點的狀態更新為初步更新；前端收到 `?payment=success` query param 後，會再呼叫 `/api/ecpay/query/:orderId` 做最終確認。
+
+---
+
+### GET /api/ecpay/query/:orderId — 主動查詢付款狀態
+
+**認證**：JWT 必要
+
+**行為描述**：前端在 `/orders/:id?payment=*` 載入時自動呼叫此端點，伺服器向 ECPay 發送 `QueryTradeInfo` 請求取得最終付款結果，再更新資料庫並回傳狀態。
+
+**業務邏輯**：
+1. 驗證訂單屬於當前用戶
+2. 取得 `ecpay_trade_no` → 不存在則 400
+3. 組合 `QueryTradeInfo` 參數（`TimeStamp` 每次重新產生，有效期 3 分鐘）
+4. POST 至 ECPay QueryTradeInfo API，解析 URL-encoded 回應
+5. `TradeStatus === '1'` → `status = 'paid'`，回傳 `{ status: 'paid', tradeInfo }`
+6. `TradeStatus === '0'` → 仍為 `pending`，回傳 `{ status: 'pending', tradeInfo }`
+7. 其他 → `status = 'failed'`，回傳 `{ status: 'failed', tradeInfo }`
+
+**回應格式**：
+```json
+{
+  "data": {
+    "status": "paid",
+    "tradeInfo": { "TradeStatus": "1", "TradeAmt": "598", ... }
+  },
+  "error": null,
+  "message": "付款成功"
+}
+```
+
+**錯誤情境**：
+- 訂單不存在或不屬於當前用戶 → 404 `NOT_FOUND`
+- 訂單無 ecpay_trade_no → 400 `NO_TRADE_NO`
+- QueryTradeInfo 呼叫失敗 → 500 `QUERY_FAILED`
+
+---
+
+## 6. 管理員商品管理
 
 ### GET /api/admin/products — 後台商品列表
 
@@ -474,7 +566,7 @@ paid/failed → 不允許任何狀態轉移（返回 422）
 
 ---
 
-## 6. 管理員訂單管理
+## 7. 管理員訂單管理
 
 ### GET /api/admin/orders — 後台訂單列表
 
@@ -547,7 +639,7 @@ paid/failed → 不允許任何狀態轉移（返回 422）
 
 ---
 
-## 7. 前台頁面功能
+## 8. 前台頁面功能
 
 | 頁面 | 路由 | 前端 JS | 認證處理 |
 |------|------|---------|---------|
